@@ -26,6 +26,13 @@
 
 p_actor는 생략할 수 있습니다. PT409 STALE_REVISION은 최신 버전을, PT409 KEY_REUSE는 같은 키의 다른 본문을 나타냅니다. PT422 BLOCKED의 상세에는 차단 사유가 담깁니다. 이미 성공한 동일 요청은 당시 응답을 반환하고, 같은 기간·자료 버전의 동시 승인은 승인 ID 한 개를 반환합니다. 입력 근거가 변경되면 기간 버전이 증가하고 계산 완료 표시는 해제됩니다. 대조 결과를 새로 저장한 뒤 finish_reconciliation을 호출해야 다음 승인을 검토할 수 있습니다.
 
+## 거래명세서 품목 상세
+
+`20261121055610_document_line_details.sql`은 운영 이력의 `20261121055526_statement_amounts.sql` 이후에 적용합니다.
+품목코드, 원산지, 로트번호, 비고, 공급가액, 할인액, 합계금액은 `doc_lines`의 선택 필드입니다.
+이미 등록한 행과 사진에서 확인할 수 없는 값은 null이며, 명세서에 적힌 0원은 0으로 저장합니다.
+`tests/verify_document_line_details.sql`은 두 사진 확인 RPC의 품목 필드 저장을 검증합니다.
+
 ## 원격 통합 검증
 
 팀 Supabase 계정으로 CLI 로그인과 프로젝트 연결을 완료한 뒤 python3 tests/verify_domain.py를 실행합니다.
