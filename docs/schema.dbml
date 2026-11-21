@@ -1,0 +1,343 @@
+// 짝짜꿍 사전 제출 기획서와 맞춘 개념 ERD
+// 필수 범위: 청구·수령 대조, 음성/텍스트 답변, 점주 승인 및 보류
+// 송금 배분과 선지급 잔액 관리는 확장 범위
+Project jjakjjakung {
+  database_type: 'PostgreSQL'
+  Note: '식자재 대금을 보내기 전에 거래처별 납품과 청구를 확인합니다.'
+}
+
+Enum period_status {
+  OPEN
+  REVIEWING
+  APPROVED
+}
+Enum match_result {
+  MATCHED
+  MISMATCH
+  MISSING_DATA
+}
+Enum fact_status {
+  UNCONFIRMED
+  OWNER_CONFIRMED
+  COUNTERPARTY_CONFIRMED
+  CONFLICTING
+}
+Enum work_status {
+  OPEN
+  NEEDS_INFO
+  WAITING_REPLY
+  CARRIED_OVER
+  ON_HOLD
+  APPROVED
+}
+Enum confirmation_scope {
+  DOCUMENTS_ONLY
+  RECEIPTS_INCLUDED
+}
+Enum evidence_role {
+  ORIGINAL
+  ANSWER
+}
+Enum document_source_mode {
+  FILE
+  TYPED_TEXT
+  VOICE_MEMO
+}
+
+Table stores {
+  id uuid [pk]
+  owner_user_id uuid [not null]
+  name text [not null]
+}
+Table suppliers {
+  id uuid [pk]
+  store_id uuid [not null]
+  name text [not null]
+  contact text
+  indexes {
+    (store_id, id) [unique]
+  }
+  Note: '같은 업체라도 점포별 거래처로 관리'
+}
+Table store_items {
+  id uuid [pk]
+  store_id uuid [not null]
+  name text [not null]
+  spec text
+  base_unit text
+  indexes {
+    (store_id, id) [unique]
+  }
+}
+Table item_aliases {
+  id uuid [pk]
+  store_id uuid [not null]
+  supplier_id uuid [not null]
+  store_item_id uuid [not null]
+  raw_name text [not null]
+  raw_spec text
+  raw_unit text
+  unit_factor numeric
+  confirmed_by uuid
+  confirmed_at timestamptz
+  Note: '거래처 품목 표기와 점포 품목을 연결합니다. 점주가 승인한 연결만 재사용합니다.'
+}
+Table documents {
+  id uuid [pk]
+  store_id uuid [not null]
+  supplier_id uuid [note: '거래처 미분류 원본은 먼저 저장 가능']
+  doc_type text [not null, note: '납품 명세서, 청구서, 반품 메모, 점주가 남긴 통화 메모(OWNER_CALL_MEMO) 등']
+  source_mode document_source_mode [not null, default: 'FILE']
+  file_path text
+  file_hash text
+  source_text text [note: '점주가 확인한 답변 또는 메모 원문']
+  created_by uuid [note: '확인한 답변이나 메모 작성자']
+  request_key text [note: '같은 응답 저장 요청의 재시도 식별']
+  doc_no text
+  doc_date date
+  supersedes_id uuid [note: '수정 청구서가 이전 문서를 가리킴']
+  created_at timestamptz [not null]
+  indexes {
+    (store_id, id) [unique]
+    (store_id, file_hash) [unique, note: '같은 파일 중복 집계 방지']
+    (store_id, request_key) [unique]
+  }
+  Note: 'FILE은 경로와 해시를 필수로 둡니다. 글·음성 메모는 확인한 텍스트와 작성자를 필수로 두고 파일 경로와 해시를 비웁니다. 오디오는 변환에 사용하고 서비스 저장소에는 두지 않습니다.'
+}
+Table doc_lines {
+  id uuid [pk]
+  store_id uuid [not null]
+  document_id uuid [not null]
+  store_item_id uuid
+  raw_name text
+  raw_spec text
+  raw_unit text
+  qty_read numeric
+  qty_corrected numeric
+  unit_price_read numeric
+  unit_price_corrected numeric
+  amount_read numeric
+  amount_corrected numeric
+  tax_basis text
+  source_location jsonb [note: '원본 페이지·영역']
+  extraction_status text
+  indexes {
+    (store_id, id) [unique]
+  }
+}
+Table receipts {
+  id uuid [pk]
+  store_id uuid [not null]
+  doc_line_id uuid [not null]
+  received_qty numeric
+  received_at timestamptz
+  confirmed_by uuid
+  confirmed_at timestamptz
+  supersedes_id uuid [note: '잘못된 수령 이벤트는 보존하고 대체 기록을 연결']
+  indexes {
+    (store_id, id) [unique]
+  }
+  Note: '실제 수령은 거래처 명세 수량과 독립적으로 기록합니다. 분할 수령은 여러 이벤트로 기록합니다.'
+}
+Table periods {
+  id uuid [pk]
+  store_id uuid [not null]
+  supplier_id uuid [not null]
+  period_start date [not null]
+  period_end date [not null]
+  payment_due_on date [note: '거래처와 합의한 지급일. 확인 전에는 NULL']
+  status period_status [not null, default: 'OPEN']
+  input_revision int [not null, default: 0]
+  indexes {
+    (store_id, id) [unique]
+    (store_id, supplier_id, period_start, period_end) [unique]
+  }
+  Note: '거래처별 시작일과 종료일로 주간·월간 등 정산 기간을 표현합니다. 종료일이 시작일보다 앞설 수 없으며, 같은 청구를 월말 집계에 중복 반영하지 않습니다.'
+}
+Table recon_items {
+  id uuid [pk]
+  store_id uuid [not null]
+  period_id uuid [not null]
+  store_item_id uuid
+  billed_amount numeric
+  expected_amount numeric
+  diff_amount numeric
+  match_result match_result [not null]
+  fact_status fact_status [not null, default: 'UNCONFIRMED']
+  confirmation_scope confirmation_scope [not null, default: 'DOCUMENTS_ONLY']
+  work_status work_status [not null, default: 'OPEN']
+  indexes {
+    (store_id, id) [unique]
+  }
+  Note: '양쪽 기록이 다르면 CONFLICTING 상태로 두고 근거를 각각 보존합니다. 근거가 없으면 미확인으로 두고 자동 차감하지 않습니다.'
+}
+Table returns {
+  id uuid [pk]
+  store_id uuid [not null]
+  supplier_id uuid [not null]
+  doc_line_id uuid
+  source_document_id uuid [not null]
+  qty numeric
+  unit text
+  returned_at timestamptz
+  accepted_status text
+  deduct_status text
+  expected_credit_amount numeric
+  scheduled_period_id uuid
+  applied_period_id uuid
+  applied_recon_item_id uuid
+  next_check_at timestamptz
+  indexes {
+    (store_id, id) [unique]
+  }
+  Note: '반품 사실과 거래처 접수, 차감 예정, 실제 청구 반영을 구분합니다.'
+}
+Table recon_links {
+  id uuid [pk]
+  store_id uuid [not null]
+  recon_item_id uuid [not null]
+  doc_line_id uuid
+  receipt_id uuid
+  return_id uuid
+  link_type text [not null]
+  allocated_qty numeric
+  allocated_amount numeric
+  Note: 'doc_line_id·receipt_id·return_id 중 정확히 하나를 지정합니다. 반품은 한 번만 합산하고 같은 수령 근거는 중복 집계하지 않습니다.'
+}
+Table questions {
+  id uuid [pk]
+  store_id uuid [not null]
+  period_id uuid
+  recon_item_id uuid
+  return_id uuid
+  question text [not null]
+  inquiry_draft text [note: '문의 문구는 점주가 검토한 뒤 보냅니다.']
+  status work_status [not null]
+  next_check_at timestamptz
+  resolved_at timestamptz
+  indexes {
+    (store_id, id) [unique]
+  }
+}
+Table question_evidence {
+  id uuid [pk]
+  store_id uuid [not null]
+  question_id uuid [not null]
+  document_id uuid [not null]
+  doc_line_id uuid
+  evidence_role evidence_role [not null]
+  source_location jsonb
+}
+Table settlement_versions {
+  id uuid [pk]
+  store_id uuid [not null]
+  period_id uuid [not null]
+  version_no int [not null]
+  input_revision int [not null]
+  confirmation_scope confirmation_scope [not null]
+  confirmed_total numeric
+  carried_total numeric
+  held_total numeric
+  snapshot jsonb [not null, note: '승인 시점 금액·근거·보류·이월을 보존']
+  approved_by uuid [not null]
+  approved_at timestamptz [not null]
+  request_key text [not null]
+  indexes {
+    (period_id, version_no) [unique]
+    (period_id, request_key) [unique]
+  }
+  Note: '점주의 청구 승인 기록입니다. 송금 여부는 송금 근거에서 별도로 확인합니다.'
+}
+Table agent_runs {
+  id uuid [pk]
+  store_id uuid [not null]
+  period_id uuid
+  role text [not null]
+  input_revision int [not null]
+  next_action text
+  output jsonb
+  request_key text [not null]
+  status text [not null]
+  attempts int [not null, default: 0]
+  started_at timestamptz
+  ended_at timestamptz
+}
+
+Table payments {
+  id uuid [pk]
+  store_id uuid [not null]
+  supplier_id uuid [not null]
+  amount numeric [not null]
+  paid_at timestamptz [not null]
+  source_document_id uuid
+  indexes {
+    (store_id, id) [unique]
+  }
+  Note: '확장 범위. 확인한 송금액 및 지급 근거를 저장합니다. 근거가 없으면 미확인입니다.'
+}
+Table payment_applications {
+  id uuid [pk]
+  store_id uuid [not null]
+  payment_id uuid [not null]
+  billing_document_id uuid [not null]
+  amount numeric [not null]
+  indexes {
+    (payment_id, billing_document_id) [unique]
+  }
+  Note: '확장 범위. 같은 점포·거래처의 청구에 적용한 금액입니다. 적용액 합계가 송금액을 넘지 않도록 검증합니다.'
+}
+TableGroup payment_extension {
+  payments
+  payment_applications
+}
+
+Ref: suppliers.store_id > stores.id
+Ref: store_items.store_id > stores.id
+Ref: item_aliases.store_id > stores.id
+Ref: documents.store_id > stores.id
+Ref: doc_lines.store_id > stores.id
+Ref: receipts.store_id > stores.id
+Ref: periods.store_id > stores.id
+Ref: recon_items.store_id > stores.id
+Ref: returns.store_id > stores.id
+Ref: recon_links.store_id > stores.id
+Ref: questions.store_id > stores.id
+Ref: question_evidence.store_id > stores.id
+Ref: settlement_versions.store_id > stores.id
+Ref: agent_runs.store_id > stores.id
+Ref: payments.store_id > stores.id
+Ref: payment_applications.store_id > stores.id
+
+Ref: item_aliases.(store_id, supplier_id) > suppliers.(store_id, id)
+Ref: item_aliases.(store_id, store_item_id) > store_items.(store_id, id)
+Ref: documents.(store_id, supplier_id) > suppliers.(store_id, id)
+Ref: documents.(store_id, supersedes_id) > documents.(store_id, id)
+Ref: doc_lines.(store_id, document_id) > documents.(store_id, id)
+Ref: doc_lines.(store_id, store_item_id) > store_items.(store_id, id)
+Ref: receipts.(store_id, doc_line_id) > doc_lines.(store_id, id)
+Ref: receipts.(store_id, supersedes_id) > receipts.(store_id, id)
+Ref: periods.(store_id, supplier_id) > suppliers.(store_id, id)
+Ref: recon_items.(store_id, period_id) > periods.(store_id, id)
+Ref: recon_items.(store_id, store_item_id) > store_items.(store_id, id)
+Ref: returns.(store_id, supplier_id) > suppliers.(store_id, id)
+Ref: returns.(store_id, doc_line_id) > doc_lines.(store_id, id)
+Ref: returns.(store_id, source_document_id) > documents.(store_id, id)
+Ref: returns.(store_id, scheduled_period_id) > periods.(store_id, id)
+Ref: returns.(store_id, applied_period_id) > periods.(store_id, id)
+Ref: returns.(store_id, applied_recon_item_id) > recon_items.(store_id, id)
+Ref: recon_links.(store_id, recon_item_id) > recon_items.(store_id, id)
+Ref: recon_links.(store_id, doc_line_id) > doc_lines.(store_id, id)
+Ref: recon_links.(store_id, receipt_id) > receipts.(store_id, id)
+Ref: recon_links.(store_id, return_id) > returns.(store_id, id)
+Ref: questions.(store_id, period_id) > periods.(store_id, id)
+Ref: questions.(store_id, recon_item_id) > recon_items.(store_id, id)
+Ref: questions.(store_id, return_id) > returns.(store_id, id)
+Ref: question_evidence.(store_id, question_id) > questions.(store_id, id)
+Ref: question_evidence.(store_id, document_id) > documents.(store_id, id)
+Ref: question_evidence.(store_id, doc_line_id) > doc_lines.(store_id, id)
+Ref: settlement_versions.(store_id, period_id) > periods.(store_id, id)
+Ref: agent_runs.(store_id, period_id) > periods.(store_id, id)
+Ref: payments.(store_id, supplier_id) > suppliers.(store_id, id)
+Ref: payments.(store_id, source_document_id) > documents.(store_id, id)
+Ref: payment_applications.(store_id, payment_id) > payments.(store_id, id)
+Ref: payment_applications.(store_id, billing_document_id) > documents.(store_id, id)
