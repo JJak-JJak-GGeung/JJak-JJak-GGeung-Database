@@ -118,6 +118,15 @@ Table doc_lines {
   unit_price_corrected numeric
   amount_read numeric
   amount_corrected numeric
+  item_code text
+  origin text
+  lot_no text
+  line_note text
+  supply_amount_read bigint
+  discount_amount_read bigint
+  line_total_read bigint
+  tax_amount_read bigint
+  line_date_text text
   tax_basis text
   source_location jsonb [note: '원본 페이지·영역']
   extraction_status text
