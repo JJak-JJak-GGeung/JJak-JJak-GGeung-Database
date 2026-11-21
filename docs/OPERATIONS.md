@@ -1,0 +1,23 @@
+# DB 계약과 통합 검증
+
+## 구현된 DB 계약
+
+팀 ERD의 17개 테이블에 기간별 원본 연결, 업로드 요청 기록, 공통 요청 기록, 확인 이력, 거래별 확인 메모를 더해 22개 테이블을 사용합니다. 기존 원본의 문서 ID·바이트 해시·Storage 경로는 유지합니다.
+
+모든 업무 테이블은 RLS를 켜고 anon·authenticated 직접 접근을 차단합니다. 로그인 없는 현재 서비스는 FastAPI 서버가 service_role로 요청을 수행합니다. 점포 소유자와 승인자 UUID는 선택값이며, 확인·메모·승인 RPC에는 비어 있지 않은 p_actor_label이 필요합니다.
+
+서버에서 호출할 RPC는 다음과 같습니다.
+
+- register_document는 기존 업로드 API와 같은 인자를 사용합니다.
+- save_confirmation(p_store,p_period,p_expected,p_key,p_body,p_actor_label,p_actor)는 수령 연결·수령 대체·청구 대체·행 정정을 저장합니다.
+- save_confirmed_memo(p_store,p_transaction,p_text,p_mode,p_expected,p_key,p_actor_label,p_actor)는 확인한 텍스트만 보존합니다.
+- finish_reconciliation(p_store,p_period,p_expected)는 서버가 거래별 대조 결과와 근거 연결을 저장한 뒤 현재 자료 버전의 계산 완료를 기록합니다.
+- approve_period(p_store,p_period,p_expected,p_key,p_actor_label,p_actor)는 현재 버전·미해결 근거를 검사하고 승인 스냅샷을 고정합니다.
+
+p_actor는 생략할 수 있습니다. PT409 STALE_REVISION은 최신 버전을, PT409 KEY_REUSE는 같은 키의 다른 본문을 나타냅니다. PT422 BLOCKED의 상세에는 차단 사유가 담깁니다. 이미 성공한 동일 요청은 당시 응답을 반환하고, 같은 기간·자료 버전의 동시 승인은 승인 ID 한 개를 반환합니다. 입력 근거가 변경되면 기간 버전이 증가하고 계산 완료 표시는 해제됩니다. 대조 결과를 새로 저장한 뒤 finish_reconciliation을 호출해야 다음 승인을 검토할 수 있습니다.
+
+## 원격 통합 검증
+
+팀 Supabase 계정으로 CLI 로그인과 프로젝트 연결을 완료한 뒤 python3 tests/verify_domain.py를 실행합니다.
+
+검증은 별도 점포에서 관계·중복 요청·수령 정정·수정 청구서·동시 승인·승인 스냅샷·송금 배분을 확인합니다. 종료 시 테스트 데이터만 삭제하고 원본 문서와 Storage 메타데이터가 유지됐는지 대조합니다. 테스트용 승인·확인 이력을 정리할 때는 하나의 트랜잭션 안에서 해당 이력의 불변 트리거를 잠시 비활성화한 뒤 복구하므로, 이 스크립트는 관리 권한이 있는 검증 환경에서 실행합니다.
